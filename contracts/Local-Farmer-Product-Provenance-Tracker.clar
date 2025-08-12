@@ -214,3 +214,74 @@
 
 (define-read-only (get-total-sales)
     (ok (var-get total-sales)))
+
+(define-constant err-verification-exists (err u109))
+(define-constant err-verification-not-found (err u110))
+
+
+
+(define-map verification-codes (string-ascii 16) uint)
+(define-map batch-verification-codes uint (string-ascii 16))
+
+(define-map verification-attempts uint {
+    verifier: principal,
+    verification-date: uint,
+    success: bool
+})
+
+(define-data-var total-verifications uint u0)
+
+(define-private (generate-verification-code (batch-id uint))
+    "VRF001BATCH001XY")
+
+(define-public (generate-batch-verification (batch-id uint))
+    (let (
+        (batch (map-get? batches batch-id))
+        (existing-code (map-get? batch-verification-codes batch-id))
+    )
+        (match batch
+            batch-data (begin
+                (asserts! (is-eq (get farmer batch-data) tx-sender) err-owner-only)
+                (asserts! (is-none existing-code) err-verification-exists)
+                (let ((verification-code (generate-verification-code batch-id)))
+                    (map-set verification-codes verification-code batch-id)
+                    (map-set batch-verification-codes batch-id verification-code)
+                    (ok verification-code)))
+            err-not-found)))
+
+(define-public (verify-product (verification-code (string-ascii 16)))
+    (let ((batch-id (map-get? verification-codes verification-code)))
+        (match batch-id
+            found-batch-id (let (
+                (verification-id (var-get total-verifications))
+                (batch-data (map-get? batches found-batch-id))
+            )
+                (map-set verification-attempts verification-id {
+                    verifier: tx-sender,
+                    verification-date: stacks-block-height,
+                    success: true
+                })
+                (var-set total-verifications (+ (var-get total-verifications) u1))
+                (ok {
+                    batch-id: found-batch-id,
+                    batch-data: batch-data,
+                    verification-successful: true
+                }))
+            (begin
+                (let ((verification-id (var-get total-verifications)))
+                    (map-set verification-attempts verification-id {
+                        verifier: tx-sender,
+                        verification-date: stacks-block-height,
+                        success: false
+                    })
+                    (var-set total-verifications (+ (var-get total-verifications) u1))
+                    err-verification-not-found)))))
+
+(define-read-only (get-batch-verification-code (batch-id uint))
+    (ok (map-get? batch-verification-codes batch-id)))
+
+(define-read-only (get-verification-stats)
+    (ok (var-get total-verifications)))
+
+(define-read-only (get-verification-attempt (verification-id uint))
+    (ok (map-get? verification-attempts verification-id)))
