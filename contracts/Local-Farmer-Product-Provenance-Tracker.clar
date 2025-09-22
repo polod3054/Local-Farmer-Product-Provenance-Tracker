@@ -285,3 +285,122 @@
 
 (define-read-only (get-verification-attempt (verification-id uint))
     (ok (map-get? verification-attempts verification-id)))
+
+(define-constant err-score-exists (err u111))
+(define-constant err-invalid-score (err u112))
+
+(define-map quality-scores uint {
+    base-score: uint,
+    farming-bonus: uint,
+    transport-bonus: uint,
+    certification-bonus: uint,
+    total-score: uint,
+    calculated-date: uint
+})
+
+(define-map farming-method-scores (string-ascii 64) uint)
+(define-data-var quality-calculations uint u0)
+
+(define-private (init-farming-scores)
+    (begin
+        (map-set farming-method-scores "organic" u30)
+        (map-set farming-method-scores "conventional" u15)
+        (map-set farming-method-scores "hydroponic" u25)
+        (map-set farming-method-scores "permaculture" u35)
+        (map-set farming-method-scores "biodynamic" u40)
+        true))
+
+(define-private (calculate-farming-score (farming-method (string-ascii 64)))
+    (default-to u10 (map-get? farming-method-scores farming-method)))
+
+(define-private (calculate-transport-score (batch-id uint))
+    (match (map-get? transport-events batch-id)
+        transport-data (let ((temp (get temperature transport-data)))
+            (if (and (>= temp 32) (<= temp 40))
+                u25
+                (if (and (>= temp 25) (<= temp 45))
+                    u15
+                    u5)))
+        u0))
+
+(define-private (calculate-certification-score (batch-id uint))
+    (match (map-get? certifications batch-id)
+        cert-data (let ((grade (get grade cert-data)))
+            (if (is-eq grade "A+")
+                u30
+                (if (is-eq grade "A")
+                    u25
+                    (if (is-eq grade "B+")
+                        u20
+                        (if (is-eq grade "B")
+                            u15
+                            u10)))))
+        u0))
+
+(define-public (calculate-quality-score (batch-id uint))
+    (let (
+        (batch (map-get? batches batch-id))
+        (existing-score (map-get? quality-scores batch-id))
+    )
+        (match batch
+            batch-data (begin
+                (asserts! (is-none existing-score) err-score-exists)
+                (let (
+                    (base-score u40)
+                    (farming-bonus (calculate-farming-score (get farming-method batch-data)))
+                    (transport-bonus (calculate-transport-score batch-id))
+                    (certification-bonus (calculate-certification-score batch-id))
+                )
+                    (let ((total-score (+ (+ (+ base-score farming-bonus) transport-bonus) certification-bonus)))
+                        (map-set quality-scores batch-id {
+                            base-score: base-score,
+                            farming-bonus: farming-bonus,
+                            transport-bonus: transport-bonus,
+                            certification-bonus: certification-bonus,
+                            total-score: (if (> total-score u100) u100 total-score),
+                            calculated-date: stacks-block-height
+                        })
+                        (var-set quality-calculations (+ (var-get quality-calculations) u1))
+                        (ok (if (> total-score u100) u100 total-score)))))
+            err-not-found)))
+
+(define-public (recalculate-quality-score (batch-id uint))
+    (let (
+        (batch (map-get? batches batch-id))
+        (existing-score (map-get? quality-scores batch-id))
+    )
+        (match batch
+            batch-data (begin
+                (asserts! (is-eq (get farmer batch-data) tx-sender) err-owner-only)
+                (let (
+                    (base-score u40)
+                    (farming-bonus (calculate-farming-score (get farming-method batch-data)))
+                    (transport-bonus (calculate-transport-score batch-id))
+                    (certification-bonus (calculate-certification-score batch-id))
+                )
+                    (let ((total-score (+ (+ (+ base-score farming-bonus) transport-bonus) certification-bonus)))
+                        (map-set quality-scores batch-id {
+                            base-score: base-score,
+                            farming-bonus: farming-bonus,
+                            transport-bonus: transport-bonus,
+                            certification-bonus: certification-bonus,
+                            total-score: (if (> total-score u100) u100 total-score),
+                            calculated-date: stacks-block-height
+                        })
+                        (var-set quality-calculations (+ (var-get quality-calculations) u1))
+                        (ok (if (> total-score u100) u100 total-score)))))
+            err-not-found)))
+
+(define-read-only (get-quality-score (batch-id uint))
+    (ok (map-get? quality-scores batch-id)))
+
+(define-read-only (get-quality-breakdown (batch-id uint))
+    (ok (map-get? quality-scores batch-id)))
+
+(define-read-only (get-farming-method-score (farming-method (string-ascii 64)))
+    (ok (default-to u10 (map-get? farming-method-scores farming-method))))
+
+(define-read-only (get-quality-calculation-stats)
+    (ok (var-get quality-calculations)))
+
+(init-farming-scores)
