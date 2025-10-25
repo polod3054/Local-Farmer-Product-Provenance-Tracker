@@ -404,3 +404,90 @@
     (ok (var-get quality-calculations)))
 
 (init-farming-scores)
+
+(define-constant err-already-reviewed (err u113))
+(define-constant err-cannot-review-own-batch (err u114))
+(define-constant err-invalid-rating (err u115))
+(define-constant err-not-buyer (err u116))
+
+(define-map product-reviews {batch-id: uint, reviewer: principal} {
+    rating: uint,
+    comment: (string-ascii 256),
+    review-date: uint,
+    verified-purchase: bool
+})
+
+(define-map farmer-reputation principal {
+    total-reviews: uint,
+    total-rating-sum: uint,
+    average-rating: uint,
+    five-star-count: uint,
+    four-star-count: uint,
+    three-star-count: uint,
+    two-star-count: uint,
+    one-star-count: uint
+})
+
+(define-map batch-review-count uint uint)
+(define-data-var total-reviews-submitted uint u0)
+
+(define-private (is-verified-buyer (batch-id uint) (buyer principal))
+    (match (map-get? sales-history batch-id)
+        sale-data (is-eq (get buyer sale-data) buyer)
+        false))
+
+(define-private (update-farmer-reputation (farmer principal) (rating uint))
+    (let (
+        (current-rep (default-to 
+            {total-reviews: u0, total-rating-sum: u0, average-rating: u0, five-star-count: u0, four-star-count: u0, three-star-count: u0, two-star-count: u0, one-star-count: u0}
+            (map-get? farmer-reputation farmer)))
+        (new-total-reviews (+ (get total-reviews current-rep) u1))
+        (new-rating-sum (+ (get total-rating-sum current-rep) rating))
+        (new-average (/ new-rating-sum new-total-reviews))
+    )
+        (map-set farmer-reputation farmer {
+            total-reviews: new-total-reviews,
+            total-rating-sum: new-rating-sum,
+            average-rating: new-average,
+            five-star-count: (if (is-eq rating u5) (+ (get five-star-count current-rep) u1) (get five-star-count current-rep)),
+            four-star-count: (if (is-eq rating u4) (+ (get four-star-count current-rep) u1) (get four-star-count current-rep)),
+            three-star-count: (if (is-eq rating u3) (+ (get three-star-count current-rep) u1) (get three-star-count current-rep)),
+            two-star-count: (if (is-eq rating u2) (+ (get two-star-count current-rep) u1) (get two-star-count current-rep)),
+            one-star-count: (if (is-eq rating u1) (+ (get one-star-count current-rep) u1) (get one-star-count current-rep))
+        })
+        true))
+
+(define-public (submit-review (batch-id uint) (rating uint) (comment (string-ascii 256)))
+    (let (
+        (batch (map-get? batches batch-id))
+        (existing-review (map-get? product-reviews {batch-id: batch-id, reviewer: tx-sender}))
+    )
+        (match batch
+            batch-data (begin
+                (asserts! (and (>= rating u1) (<= rating u5)) err-invalid-rating)
+                (asserts! (not (is-eq (get farmer batch-data) tx-sender)) err-cannot-review-own-batch)
+                (asserts! (is-none existing-review) err-already-reviewed)
+                (let ((verified-purchase (is-verified-buyer batch-id tx-sender)))
+                    (map-set product-reviews {batch-id: batch-id, reviewer: tx-sender} {
+                        rating: rating,
+                        comment: comment,
+                        review-date: stacks-block-height,
+                        verified-purchase: verified-purchase
+                    })
+                    (update-farmer-reputation (get farmer batch-data) rating)
+                    (map-set batch-review-count batch-id (+ (default-to u0 (map-get? batch-review-count batch-id)) u1))
+                    (var-set total-reviews-submitted (+ (var-get total-reviews-submitted) u1))
+                    (ok true)))
+            err-not-found)))
+
+(define-read-only (get-review (batch-id uint) (reviewer principal))
+    (ok (map-get? product-reviews {batch-id: batch-id, reviewer: reviewer})))
+
+(define-read-only (get-farmer-reputation (farmer principal))
+    (ok (map-get? farmer-reputation farmer)))
+
+(define-read-only (get-batch-review-count (batch-id uint))
+    (ok (default-to u0 (map-get? batch-review-count batch-id))))
+
+(define-read-only (get-total-reviews)
+    (ok (var-get total-reviews-submitted)))
