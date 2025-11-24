@@ -491,3 +491,128 @@
 
 (define-read-only (get-total-reviews)
     (ok (var-get total-reviews-submitted)))
+
+(define-constant err-already-recalled (err u117))
+(define-constant err-invalid-severity (err u118))
+(define-constant err-unauthorized-recall (err u119))
+(define-constant err-recall-not-found (err u120))
+
+(define-map batch-recalls uint {
+    issuer: principal,
+    issuer-type: (string-ascii 16),
+    severity: (string-ascii 16),
+    reason: (string-ascii 256),
+    affected-quantity: uint,
+    recall-date: uint,
+    status: (string-ascii 16),
+    resolution-date: (optional uint),
+    resolution-notes: (optional (string-ascii 256))
+})
+
+(define-map recall-notifications {batch-id: uint, notified-party: principal} {
+    notification-date: uint,
+    acknowledged: bool,
+    acknowledgment-date: (optional uint)
+})
+
+(define-data-var total-recalls uint u0)
+(define-data-var active-recalls uint u0)
+
+(define-private (is-authorized-for-recall (batch-id uint) (issuer principal))
+    (let ((batch (map-get? batches batch-id)))
+        (match batch
+            batch-data (or 
+                (is-eq (get farmer batch-data) issuer)
+                (default-to false (map-get? inspectors issuer)))
+            false)))
+
+(define-private (is-valid-severity (severity (string-ascii 16)))
+    (or (or (is-eq severity "critical") (is-eq severity "high"))
+        (or (is-eq severity "medium") (is-eq severity "low"))))
+
+(define-public (issue-recall (batch-id uint) (severity (string-ascii 16)) (reason (string-ascii 256)) (affected-quantity uint))
+    (let (
+        (batch (map-get? batches batch-id))
+        (existing-recall (map-get? batch-recalls batch-id))
+    )
+        (match batch
+            batch-data (begin
+                (asserts! (is-authorized-for-recall batch-id tx-sender) err-unauthorized-recall)
+                (asserts! (is-none existing-recall) err-already-recalled)
+                (asserts! (is-valid-severity severity) err-invalid-severity)
+                (let (
+                    (issuer-type (if (default-to false (map-get? inspectors tx-sender)) "inspector" "farmer"))
+                )
+                    (map-set batch-recalls batch-id {
+                        issuer: tx-sender,
+                        issuer-type: issuer-type,
+                        severity: severity,
+                        reason: reason,
+                        affected-quantity: affected-quantity,
+                        recall-date: stacks-block-height,
+                        status: "active",
+                        resolution-date: none,
+                        resolution-notes: none
+                    })
+                    (var-set total-recalls (+ (var-get total-recalls) u1))
+                    (var-set active-recalls (+ (var-get active-recalls) u1))
+                    (ok true)))
+            err-not-found)))
+
+(define-public (resolve-recall (batch-id uint) (resolution-notes (string-ascii 256)))
+    (let ((recall (map-get? batch-recalls batch-id)))
+        (match recall
+            recall-data (begin
+                (asserts! (is-eq (get issuer recall-data) tx-sender) err-owner-only)
+                (asserts! (is-eq (get status recall-data) "active") err-invalid-batch)
+                (map-set batch-recalls batch-id (merge recall-data {
+                    status: "resolved",
+                    resolution-date: (some stacks-block-height),
+                    resolution-notes: (some resolution-notes)
+                }))
+                (var-set active-recalls (- (var-get active-recalls) u1))
+                (ok true))
+            err-recall-not-found)))
+
+(define-public (acknowledge-recall (batch-id uint))
+    (let (
+        (recall (map-get? batch-recalls batch-id))
+        (notification-key {batch-id: batch-id, notified-party: tx-sender})
+        (existing-notification (map-get? recall-notifications notification-key))
+    )
+        (match recall
+            recall-data (begin
+                (asserts! (is-some recall) err-recall-not-found)
+                (match existing-notification
+                    notif-data (begin
+                        (map-set recall-notifications notification-key (merge notif-data {
+                            acknowledged: true,
+                            acknowledgment-date: (some stacks-block-height)
+                        }))
+                        (ok true))
+                    (begin
+                        (map-set recall-notifications notification-key {
+                            notification-date: stacks-block-height,
+                            acknowledged: true,
+                            acknowledgment-date: (some stacks-block-height)
+                        })
+                        (ok true))))
+            err-recall-not-found)))
+
+(define-read-only (get-recall-info (batch-id uint))
+    (ok (map-get? batch-recalls batch-id)))
+
+(define-read-only (get-recall-acknowledgment (batch-id uint) (party principal))
+    (ok (map-get? recall-notifications {batch-id: batch-id, notified-party: party})))
+
+(define-read-only (get-recall-stats)
+    (ok {
+        total-recalls: (var-get total-recalls),
+        active-recalls: (var-get active-recalls),
+        resolved-recalls: (- (var-get total-recalls) (var-get active-recalls))
+    }))
+
+(define-read-only (is-batch-recalled (batch-id uint))
+    (match (map-get? batch-recalls batch-id)
+        recall-data (ok (is-eq (get status recall-data) "active"))
+        (ok false)))
